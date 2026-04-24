@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { neon } from '@neondatabase/serverless'
 
+
 const sql = neon(process.env.DATABASE_URL!)
 
 async function getPortfolioContext() {
@@ -91,15 +92,19 @@ async function callAnthropic(
       'anthropic-version': '2023-06-01',
     },
     body: JSON.stringify({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 400,
+      model: 'claude-3-haiku-20240307',
+      max_tokens: 300,
       system: systemPrompt,
       messages,
     }),
   })
-const reply = data?.choices?.[0]?.message?.content?.trim();
-if (reply) return reply;
 
+  const data = await res.json()
+
+  const reply = data?.content?.[0]?.text?.trim()
+  if (reply) return reply
+
+  throw new ApiError("Empty response from Anthropic", 500)
 }
 
 async function callGroq(
@@ -202,6 +207,20 @@ export async function POST(req: Request) {
     const body = await req.json()
     const { message, history } = body as { message?: string; history?: unknown[] }
 
+    const lowerMsg = message?.toLowerCase() || "";
+
+let intent = "general";
+
+if (lowerMsg.includes("hire")) intent = "hire";
+else if (lowerMsg.includes("project")) intent = "project";
+else if (lowerMsg.includes("contact")) intent = "contact";
+else if (lowerMsg.includes("resume")) intent = "resume";
+
+await sql`
+  INSERT INTO ai_analytics (message, intent)
+  VALUES (${message}, ${intent})
+`;
+
     if (!message?.trim()) {
       return NextResponse.json({ error: 'Message required' }, { status: 400 })
     }
@@ -215,14 +234,12 @@ export async function POST(req: Request) {
 
     // ── Primary call ────────────────────────────────────────────────────────
     if (anthropicKey) {
-      try {
-        const finalReply =
-  reply && !reply.toLowerCase().includes("i don't have")
-    ? reply
-    : buildFallbackAnswer(message, portfolio)
+  try {
+    const reply = await callAnthropic(anthropicKey, systemPrompt, chatMessages)
 
-return NextResponse.json({ reply: finalReply })
-      } catch (e) {
+    return NextResponse.json({ reply })
+
+  } catch (e) {
         if (e instanceof ApiError && e.status === 400) {
           // 400 from Anthropic almost always means bad history shape.
           // Retry with NO history — just the current message.
